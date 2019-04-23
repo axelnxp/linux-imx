@@ -183,7 +183,8 @@ static void ion_buffer_kmap_put(struct ion_buffer *buffer)
 	}
 }
 
-static struct sg_table *dup_sg_table(struct sg_table *table)
+static struct sg_table *dup_sg_table(struct sg_table *table,
+				     bool preserve_dma_address)
 {
 	struct sg_table *new_table;
 	int ret, i;
@@ -202,7 +203,9 @@ static struct sg_table *dup_sg_table(struct sg_table *table)
 	new_sg = new_table->sgl;
 	for_each_sg(table->sgl, sg, table->nents, i) {
 		memcpy(new_sg, sg, sizeof(*sg));
-		sg->dma_address = 0;
+		if (!preserve_dma_address)
+			new_sg->dma_address = 0;
+
 		new_sg = sg_next(new_sg);
 	}
 
@@ -219,6 +222,7 @@ struct ion_dma_buf_attachment {
 	struct device *dev;
 	struct sg_table *table;
 	struct list_head list;
+	bool no_map;
 };
 
 static int ion_dma_buf_attach(struct dma_buf *dmabuf, struct device *dev,
@@ -232,7 +236,10 @@ static int ion_dma_buf_attach(struct dma_buf *dmabuf, struct device *dev,
 	if (!a)
 		return -ENOMEM;
 
-	table = dup_sg_table(buffer->sg_table);
+	if (buffer->heap->type == ION_HEAP_TYPE_UNMAPPED)
+		a->no_map = true;
+
+	table = dup_sg_table(buffer->sg_table, a->no_map);
 	if (IS_ERR(table)) {
 		kfree(a);
 		return -ENOMEM;
@@ -257,10 +264,10 @@ static void ion_dma_buf_detatch(struct dma_buf *dmabuf,
 	struct ion_dma_buf_attachment *a = attachment->priv;
 	struct ion_buffer *buffer = dmabuf->priv;
 
-	free_duped_table(a->table);
 	mutex_lock(&buffer->lock);
 	list_del(&a->list);
 	mutex_unlock(&buffer->lock);
+	free_duped_table(a->table);
 
 	kfree(a);
 }
@@ -273,6 +280,9 @@ static struct sg_table *ion_map_dma_buf(struct dma_buf_attachment *attachment,
 
 	table = a->table;
 
+	if (a->no_map)
+		return table;
+
 	if (!dma_map_sg(attachment->dev, table->sgl, table->nents,
 			direction))
 		return ERR_PTR(-ENOMEM);
@@ -284,6 +294,11 @@ static void ion_unmap_dma_buf(struct dma_buf_attachment *attachment,
 			      struct sg_table *table,
 			      enum dma_data_direction direction)
 {
+	struct ion_dma_buf_attachment *a = attachment->priv;
+
+	if (a->no_map)
+		return;
+
 	dma_unmap_sg(attachment->dev, table->sgl, table->nents, direction);
 }
 
@@ -380,6 +395,21 @@ static int ion_dma_buf_end_cpu_access(struct dma_buf *dmabuf,
 	return 0;
 }
 
+static void *ion_dma_buf_vmap(struct dma_buf *dmabuf)
+{
+	struct ion_buffer *buffer = dmabuf->priv;
+
+	if (ion_dma_buf_begin_cpu_access(dmabuf, DMA_NONE) != 0)
+		return NULL;
+
+	return buffer->vaddr;
+}
+
+static void ion_dma_buf_vunmap(struct dma_buf *dmabuf, void *vaddr)
+{
+	ion_dma_buf_end_cpu_access(dmabuf, DMA_NONE);
+}
+
 static const struct dma_buf_ops dma_buf_ops = {
 	.map_dma_buf = ion_map_dma_buf,
 	.unmap_dma_buf = ion_unmap_dma_buf,
@@ -393,6 +423,8 @@ static const struct dma_buf_ops dma_buf_ops = {
 	.unmap_atomic = ion_dma_buf_kunmap,
 	.map = ion_dma_buf_kmap,
 	.unmap = ion_dma_buf_kunmap,
+	.vmap = ion_dma_buf_vmap,
+	.vunmap = ion_dma_buf_vunmap,
 };
 
 int ion_alloc(size_t len, unsigned int heap_id_mask, unsigned int flags)
@@ -540,6 +572,52 @@ static int debug_shrink_get(void *data, u64 *val)
 DEFINE_SIMPLE_ATTRIBUTE(debug_shrink_fops, debug_shrink_get,
 			debug_shrink_set, "%llu\n");
 
+static int ion_heap_debug_show(struct seq_file *s, void *unused)
+{
+	struct ion_heap *heap = s->private;
+	struct ion_device *dev = heap->dev;
+	if(heap->debug_show)
+		heap->debug_show(heap, s, unused);
+
+	return 0;
+}
+
+static int ion_heap_debug_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ion_heap_debug_show, inode->i_private);
+}
+
+#ifdef CONFIG_ION_MONITOR
+static ssize_t ion_heap_debug_write(struct file *fp, const char __user *user_buffer,
+	                           size_t count, loff_t *position)
+{
+	struct ion_heap* heap = fp->f_inode->i_private;
+	char ker_buf[count];
+	size_t ret;
+	ret = simple_write_to_buffer(ker_buf, sizeof(ker_buf), position, user_buffer, count);
+	if(ker_buf[0] == '1') {
+		printk("ion monitor tool enabled for %s heap\n", heap->name);
+		heap->debug_state = 1;
+	}
+	else {
+		printk("ion monitor tool disabled for %s heap\n", heap->name);
+		heap->debug_state = 0;
+	}
+	
+	return ret;
+}
+#endif /* CONFIG_ION_MONITOR */
+
+static const struct file_operations ion_heap_debug_fops = {
+	.open           = ion_heap_debug_open,
+#ifdef CONFIG_ION_MONITOR
+	.write          = ion_heap_debug_write,
+#endif /* CONFIG_ION_MONITOR */
+	.read           = seq_read,
+	.llseek         = seq_lseek,
+	.release        = single_release,
+};
+
 void ion_device_add_heap(struct ion_heap *heap)
 {
 	struct dentry *debug_file;
@@ -567,6 +645,17 @@ void ion_device_add_heap(struct ion_heap *heap)
 	 */
 	plist_node_init(&heap->node, -heap->id);
 	plist_add(&heap->node, &dev->heaps);
+
+	debug_file = debugfs_create_file(heap->name, 0644, 
+	                                 dev->debug_root, heap,
+	                                 &ion_heap_debug_fops);
+	if (!debug_file) {
+        char buf[256], *path;
+        
+        path = dentry_path(dev->debug_root, buf, 256);
+        pr_err("Failed to create heap debugfs at %s/%s\n",
+               path, heap->name);
+    }
 
 	if (heap->shrinker.count_objects && heap->shrinker.scan_objects) {
 		char debug_name[64];

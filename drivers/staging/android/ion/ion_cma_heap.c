@@ -28,6 +28,14 @@
 struct ion_cma_heap {
 	struct ion_heap heap;
 	struct cma *cma;
+
+	#ifdef CONFIG_ION_MONITOR
+	size_t heap_size;
+	size_t free_size;
+	size_t allocated_size;
+	size_t allocated_peak;
+	size_t largest_free_buf;
+	#endif /* CONFIG_ION_MONITOR */
 };
 
 #define to_cma_heap(x) container_of(x, struct ion_cma_heap, heap)
@@ -110,6 +118,56 @@ static struct ion_heap_ops ion_cma_ops = {
 	.unmap_kernel = ion_heap_unmap_kernel,
 };
 
+#ifdef CONFIG_ION_MONITOR
+static void update_cma_heap_info(struct ion_heap* heap) 
+{
+	struct ion_cma_heap *cma_heap;
+	cma_heap = to_cma_heap(heap);
+
+	cma_heap->heap_size = cma_get_size(cma_heap->cma);
+	cma_heap->free_size = cma_get_free_size(cma_heap->cma);
+	cma_heap->allocated_size = cma_heap->heap_size - cma_heap->free_size;
+	if(cma_heap->allocated_size > cma_heap->allocated_peak) cma_heap->allocated_peak = cma_heap->allocated_size;
+	cma_heap->largest_free_buf = cma_get_largest_free_buf(cma_heap->cma);
+}
+#endif /* CONFIG_ION_MONITOR */ 
+
+static int ion_cma_heap_debug_show(struct ion_heap *heap, struct seq_file *s, void *unused)
+{
+	#ifdef CONFIG_ION_MONITOR
+
+	if(!heap->debug_state) {
+		seq_puts(s, "\n ION monitor tool is disabled.\n");
+		return 0;
+	}
+
+	struct ion_cma_heap *cma_heap;
+	size_t heap_frag;
+
+	cma_heap = to_cma_heap(heap);
+	
+	seq_puts(s, "\n----- ION CMA HEAP DEBUG -----\n");
+
+	if(heap->type == ION_HEAP_TYPE_DMA) {
+		update_cma_heap_info(heap);
+
+		heap_frag = ((cma_heap->free_size - cma_heap->largest_free_buf) * 100) / cma_heap->free_size;
+
+		seq_printf(s, "%19s %19zu\n", "heap size", cma_heap->heap_size);
+		seq_printf(s, "%19s %19zu\n", "free size", cma_heap->free_size);
+		seq_printf(s, "%19s %19zu\n", "allocated size", cma_heap->allocated_size);
+		seq_printf(s, "%19s %19zu\n", "allocated peak", cma_heap->allocated_peak);
+		seq_printf(s, "%19s %19zu\n", "largest free buffer", cma_heap->largest_free_buf);
+		seq_printf(s, "%19s %19zu\n", "heap fragmentation", heap_frag);
+	}
+	else {
+		pr_err("%s: Invalid heap type for debug: %d\n", __func__, heap->type);
+	}
+	seq_puts(s, "\n");
+	#endif /* CONFIG_ION_MONITOR */
+	return 0;
+}
+
 static struct ion_heap *__ion_cma_heap_create(struct cma *cma)
 {
 	struct ion_cma_heap *cma_heap;
@@ -126,6 +184,18 @@ static struct ion_heap *__ion_cma_heap_create(struct cma *cma)
 	 */
 	cma_heap->cma = cma;
 	cma_heap->heap.type = ION_HEAP_TYPE_DMA;
+
+	#ifdef CONFIG_ION_MONITOR
+	cma_heap->heap.debug_show = ion_cma_heap_debug_show;
+	cma_heap->heap.name = cma_get_name(cma);
+	cma_heap->heap.debug_state = 1;
+	cma_heap->heap_size = cma_get_size(cma_heap->cma);
+	cma_heap->free_size = cma_get_free_size(cma_heap->cma);
+	cma_heap->allocated_size = cma_heap->heap_size - cma_heap->free_size;
+	cma_heap->allocated_peak = cma_heap->allocated_size;
+	cma_heap->largest_free_buf = cma_get_largest_free_buf(cma_heap->cma);
+	#endif /* CONFIG_ION_MONITOR */
+
 	return &cma_heap->heap;
 }
 

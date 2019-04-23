@@ -166,6 +166,42 @@ struct gen_pool *gen_pool_create(int min_alloc_order, int nid)
 }
 EXPORT_SYMBOL(gen_pool_create);
 
+#ifdef CONFIG_ION_MONITOR
+/**
+ * gen_pool_largest_free_buf - 
+ * @pool: pointer to gen_pool
+ * 
+ * Returns largest free buffer in the pool 
+ */
+size_t gen_pool_largest_free_buf(struct gen_pool *pool) 
+{
+	struct gen_pool_chunk *chunk;
+	int order = pool->min_alloc_order;
+	unsigned long *map;
+	unsigned long largest_free_buf;
+	unsigned long bitmap_size;
+	unsigned long buf_size, next_free_buf, next_allocated_buf;
+	largest_free_buf = 0;
+	rcu_read_lock();
+	list_for_each_entry_rcu(chunk, &pool->chunks, next_chunk) {
+		bitmap_size = chunk_size(chunk) >> order;
+		map = chunk->bits;
+		next_free_buf = find_next_zero_bit(map, bitmap_size, 0);
+		while(next_free_buf < bitmap_size) {
+			next_allocated_buf = find_next_bit(map, bitmap_size, next_free_buf);
+			buf_size = next_allocated_buf - next_free_buf;
+			if(buf_size > largest_free_buf) largest_free_buf = buf_size;
+			next_free_buf = find_next_zero_bit(map, bitmap_size, next_allocated_buf);
+		}
+	}
+	rcu_read_unlock();
+	return largest_free_buf << order;
+}
+EXPORT_SYMBOL(gen_pool_largest_free_buf);
+
+#endif /* CONFIG_ION_MONITOR */ 
+
+
 /**
  * gen_pool_add_virt - add a new chunk of special memory to the pool
  * @pool: pool to add new memory chunk to

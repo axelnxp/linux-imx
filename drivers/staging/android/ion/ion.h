@@ -188,6 +188,10 @@ struct ion_heap {
 	wait_queue_head_t waitqueue;
 	struct task_struct *task;
 
+	#ifdef CONFIG_ION_MONITOR
+	size_t debug_state;
+	#endif /* CONFIG_ION_MONITOR */
+
 	int (*debug_show)(struct ion_heap *heap, struct seq_file *, void *);
 };
 

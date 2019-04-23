@@ -79,6 +79,12 @@ struct gen_pool_chunk {
 	unsigned long bits[0];		/* bitmap for allocating memory chunk */
 };
 
+#ifdef CONFIG_ION_MONITOR
+
+extern size_t gen_pool_largest_free_buf(struct gen_pool *pool);
+
+#endif /* CONFIG_ION_MONITOR
+
 /*
  *  gen_pool data descriptor for gen_pool_first_fit_align.
  */

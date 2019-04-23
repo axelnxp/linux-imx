@@ -23,6 +23,8 @@
 #include <linux/vmalloc.h>
 #include "ion.h"
 
+#define to_chunk_heap(x) container_of(x, struct ion_chunk_heap, heap)
+
 struct ion_chunk_heap {
 	struct ion_heap heap;
 	struct gen_pool *pool;
@@ -30,6 +32,11 @@ struct ion_chunk_heap {
 	unsigned long chunk_size;
 	unsigned long size;
 	unsigned long allocated;
+	#ifdef CONFIG_ION_MONITOR
+	unsigned long free_size;
+	unsigned long largest_free_buf;
+	unsigned long allocated_peak;
+	#endif /* CONFIG_ION_MONITOR */
 };
 
 static int ion_chunk_heap_allocate(struct ion_heap *heap,
@@ -117,6 +124,60 @@ static struct ion_heap_ops chunk_heap_ops = {
 	.unmap_kernel = ion_heap_unmap_kernel,
 };
 
+#ifdef CONFIG_ION_MONITOR
+
+/**
+ * update_chunk_heap_info - Update the debug info of the heap
+ * @heap: ion heap
+ */
+static void update_chunk_heap_info(struct ion_heap *heap)
+{
+	struct ion_chunk_heap *chunk_heap = to_chunk_heap(heap);
+
+	chunk_heap->free_size = gen_pool_avail(chunk_heap->pool);
+	if(chunk_heap->allocated > chunk_heap->allocated_peak) chunk_heap->allocated_peak = chunk_heap->allocated;
+	chunk_heap->largest_free_buf = gen_pool_largest_free_buf(chunk_heap->pool);
+}
+
+#endif /* CONFIG_ION_MONITOR */
+
+static int ion_chunk_heap_debug_show(struct ion_heap *heap, struct seq_file *s, void *unused)
+{
+	#ifdef CONFIG_ION_MONITOR
+
+	if(!heap->debug_state) {
+		seq_puts(s, "\n ION monitor tool is disabled.\n");
+		return 0;
+	}
+
+	seq_puts(s, "\n----- ION CHUNK HEAP DEBUG -----\n");
+
+	struct ion_chunk_heap *chunk_heap = to_chunk_heap(heap);
+	size_t heap_frag = 0;
+	
+	if(heap->type == ION_HEAP_TYPE_CHUNK) {
+		update_chunk_heap_info(heap);
+
+		heap_frag = ((chunk_heap->free_size - chunk_heap->largest_free_buf) * 100) / chunk_heap->free_size;
+
+		seq_printf(s, "%19s %19x\n", "base address", chunk_heap->base);
+		seq_printf(s, "%19s %19zu\n", "heap size", chunk_heap->size);
+		seq_printf(s, "%19s %19zu\n", "chunk size", chunk_heap->chunk_size);
+		seq_printf(s, "%19s %19zu\n", "free size", chunk_heap->free_size);
+		seq_printf(s, "%19s %19zu\n", "allocated size", chunk_heap->allocated);
+		seq_printf(s, "%19s %19zu\n", "allocated peak", chunk_heap->allocated_peak);
+		seq_printf(s, "%19s %19zu\n", "largest free buffer", chunk_heap->largest_free_buf);
+		seq_printf(s, "%19s %19zu\n", "heap fragmentation", heap_frag);		
+	}
+	else {
+		pr_err("%s: Invalid heap type for debug: %d\n", __func__, heap->type);
+	}
+	seq_puts(s, "\n");
+
+	#endif /* CONFIG_ION_MONITOR */
+	return 0;
+}
+
 struct ion_heap *ion_chunk_heap_create(struct ion_platform_heap *heap_data)
 {
 	struct ion_chunk_heap *chunk_heap;
@@ -150,8 +211,18 @@ struct ion_heap *ion_chunk_heap_create(struct ion_platform_heap *heap_data)
 	chunk_heap->heap.ops = &chunk_heap_ops;
 	chunk_heap->heap.type = ION_HEAP_TYPE_CHUNK;
 	chunk_heap->heap.flags = ION_HEAP_FLAG_DEFER_FREE;
+	chunk_heap->heap.debug_show = ion_chunk_heap_debug_show;
 	pr_debug("%s: base %pa size %zu\n", __func__,
 		 &chunk_heap->base, heap_data->size);
+
+	#ifdef CONFIG_ION_MONITOR
+
+	chunk_heap->free_size = gen_pool_avail(chunk_heap->pool);
+	chunk_heap->allocated_peak = chunk_heap->allocated;
+	chunk_heap->largest_free_buf = gen_pool_largest_free_buf(chunk_heap->pool);
+	chunk_heap->heap.debug_state = 1;
+	
+	#endif /* CONFIG_ION_MONITOR */ 
 
 	return &chunk_heap->heap;
 
